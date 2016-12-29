@@ -1,0 +1,227 @@
+#!/bin/env python2.6
+
+# -*- encoding: utf-8 -*-
+import git
+import random
+import time
+import os
+import filecmp
+import fcntl
+import shutil
+import logging
+import sys
+import socket
+import MySQLdb
+import re
+import datetime
+import subprocess
+from git.repo import Repo
+from optparse import OptionParser
+from os.path import join as path_join
+
+is_same = True
+sql_wr = None
+cmd_return = None
+
+fh = logging.FileHandler('/var/log/conf-pull.log')
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+fh.setFormatter(formatter)
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+logger.addHandler(fh)
+
+
+class FileLock(object):
+    def __init__(self, file_name):
+        if not os.path.exists("/var/run/lock/{0}".format(file_name)):
+            if not os.path.exists("/var/run/lock"):
+                os.makedirs("/var/run/lock")
+            self.file_obj = open("/var/run/lock/{0}".format(file_name), 'a')
+        else:
+            self.file_obj = open("/var/run/lock/{0}".format(file_name))
+
+    def __enter__(self):
+        fcntl.flock(self.file_obj, fcntl.LOCK_EX)
+        return self.file_obj
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        fcntl.flock(self.file_obj, fcntl.LOCK_UN)
+
+
+def git_pull(remote_url, local, idc_dir):
+    """
+    @remote: git remote address
+    @local: local git repo dir
+    """
+    if not os.path.exists(local):
+        os.mkdir(local)
+
+    if not os.path.exists("{0}/.git".format(local)) or not git.repo.fun.is_git_dir("{0}/.git".format(local)):
+        repo = Repo.clone_from(remote_url, local)
+        if not repo:
+            logger.debug("clone repo from {0} to {1}failed.\n".format(remote_url, local))
+            return False
+    else:
+        repo = Repo(local)
+        git_commit = git.Git(idc_dir)
+        if os.path.exists("/var/log/commit_end.log"):
+            commit_file = open('/var/log/commit_end.log', 'r')
+            repo_head = commit_file.read()
+        else:
+            repo_head = repo.head.commit.hexsha
+        with FileLock(os.path.split(local)[1]) as _flock:
+            for remote_it in repo.remotes:
+                if remote_it.url == remote_url:
+                    remote = remote_it
+                    break
+
+            if remote is None:
+                remote_name = "%x" % (random.randint(0, 1000000) ^ int(time.time()))
+                remote = repo.create_remote(remote_name, remote_url)
+
+            ret = ""
+            try:
+                info_list = remote.pull(refspec="master:master")
+                for info in info_list:
+                    ret = info.flags & (git.FetchInfo.REJECTED | git.FetchInfo.ERROR)
+                if ret > 0:
+                    logger.warning("[conf-pull] pull from remote error!\n")
+            except (git.GitCommandError, git.RepositoryDirtyError) as e:
+                logger.warning("git pull error, error={0}\n".format(str(e)))
+            except Exception:
+                logger.warning("git pull error, other exception.\n")
+        return git_commit.log("{0}..HEAD".format(repo_head), "--pretty=%H,%ai,%s", idc_dir)
+
+
+def conf_install(src, dest):
+    global is_same
+    if not os.path.exists(dest):
+        os.makedirs(dest)
+    if not os.path.exists(src) or not os.path.exists(dest):
+        logger.warning("Please check directory {0} or {1} exist".format(src, dest))
+        return is_same
+
+    if os.path.isdir(src) and os.path.isdir(dest):
+        d_diff = filecmp.dircmp(src, dest, ['RCS', 'CVS', 'tags', '.git', 'stats.conf'], [os.curdir, os.pardir])
+        if d_diff.left_only or d_diff.diff_files:
+            print(d_diff.left_only, d_diff.diff_files)
+            is_same = False
+
+        # copy diff file from src to dest.
+        for f in d_diff.left_only:
+            if os.path.isfile(path_join(src, f)):
+                shutil.copyfile(path_join(src, f), path_join(dest, f))
+            elif os.path.isdir(path_join(src, f)):
+                shutil.copytree(path_join(src, f), path_join(dest, f))
+            logger.info("copy from {0} to {1}".format(path_join(src, f), path_join(dest, f)))
+
+        for f in d_diff.diff_files:
+            shutil.copyfile(path_join(src, f), path_join(dest, f))
+            logger.info("copy from {0} to {1}".format(path_join(src, f), path_join(dest, f)))
+
+        for d in d_diff.common_dirs:
+            is_same = conf_install(os.path.join(src, d), os.path.join(dest, d))
+
+    elif os.path.isfile(src) and os.path.isfile(dest):
+        content_diff = filecmp.cmp(src, dest)
+        if content_diff:
+            is_same = False
+
+    return is_same
+
+
+def result_write_mysql(commits, git_type, success):
+    commit_args = {
+        "hostname": socket.gethostname(),
+        "group_id": re.sub('-[0-9][0-9]$|-[1-9]$|-[1-9][0-9][0-9]$|-[1-9][0-9][0-9][0-9][0-9]$', '',
+                           socket.gethostname()),
+        "reload_time": datetime.datetime.strftime(datetime.datetime.now(), '%Y-%m-%d %H:%M:%S'),
+        "git_type": git_type,
+        "reload_success": success,
+        "commit_id": "",
+        "commit_time": ""
+    }
+    conn = MySQLdb.connect(host='172.17.133.13', user='salt', passwd='salt!@#db', db='git', port=3306)
+    cur = conn.cursor()
+    commits = commits.split('\n')
+    for commit in commits[::-1]:
+        commit = commit.encode("utf-8")
+        commit = commit.split(',')
+        commit_args['commit_id'] = commit[0]
+        commit_args['commit_time'] = commit[1].split('+0800')[0]
+        sql = 'insert into git_table ' \
+              '(hostname,commit_id,group_id,git_type,commit_time,reload_time,reload_success)' \
+              'values ("{hostname}","{commit_id}","{group_id}","{git_type}","{commit_time}","{reload_time}",' \
+              '"{reload_success}")'.format(**commit_args)
+        sql_cur = cur.execute(sql)
+        logger.info('commit_id %s write mysql' % (commit[0]))
+        commit_file = open('/var/log/commit_end.log', 'w')
+        commit_file.write(commit[0])
+        commit_file.close()
+    cur.close()
+    sql_commit = conn.commit()
+    return sql_cur
+
+
+def cmd_check(cmd):
+    p = subprocess.Popen(args=reload_cmd, stdout=subprocess.PIPE,
+                         close_fds=True, shell=True)
+    p.wait()
+    if None == p.returncode:
+        p.terminate()
+        logger.error("Exectue {0} timeout, Terminate it abnormal!\n".format(sys.argv[0]))
+    elif p.returncode != 0:
+        stdout, stderr = p.communicate()
+        logger.error("[{0}] return error, stdout:{1}, stderr:{2}\n".format(reload_cmd,
+                                                                           stdout, stderr))
+    return p.returncode
+
+
+if __name__ == '__main__':
+
+    logger.info('-----------------------conf-pull run start')
+
+    parser = OptionParser()
+    parser.add_option('-r', '--git-remote', action="store", dest="remote", help="git remote repo address.")
+    parser.add_option('-l', '--git-local', action="store", dest="local", help="git local repo address")
+    parser.add_option('-s', '--copy-from', action="store", dest="source", help="directory to copy.")
+    parser.add_option('-d', '--copy-to', action="store", dest="dest", help="directory copy to")
+    parser.add_option('-p', '--post-run', action="store", dest="cmd", help="command to run after dir copy")
+
+    (options, arg) = parser.parse_args(sys.argv[1:])
+    if not options.remote or not options.local or not options.source or not options.dest or not options.cmd:
+        os.system("{0} -h".format(sys.argv[0]))
+
+    logger.info('pull start')
+    commit_str = git_pull(local=options.local, remote_url=options.remote, idc_dir=options.source)
+    logger.info('pull end commit=%s' % commit_str)
+    logger.info('cp start')
+    is_same = conf_install(options.source, options.dest)
+    logger.info('is_same = %s cp end' % is_same)
+    if not is_same:
+        if not commit_str:
+            logger.debug(options.cmd)
+            os.system(options.cmd)
+        else:
+            reload_cmd = options.cmd
+            if "HA" in socket.gethostname() or "IM" in socket.gethostname():
+                haproxy = os.popen("rpm -qa|grep -E '^haproxy-[0-9]'|tr - ' '|tr . ' '|awk '{print $2 $3 $4 $5}'")
+                haproxy_ver = haproxy.read()
+                if int(haproxy_ver) >= 15128:
+                    if 'reload' in commit_str:
+                        reload_cmd = options.cmd
+                    else:
+                        reload_cmd = '/sbin/service haproxy check &&  /sbin/pidof haproxy | xargs -n1 kill -s USR2'  ## kill
+            logger.warning(reload_cmd)
+            cmd_return = cmd_check(reload_cmd)
+            if cmd_return != 0:
+                cmd_return = cmd_check(reload_cmd)
+            if cmd_return == 0:
+                cmd_return = 1
+            else:
+                cmd_return = 0
+            sql_return = result_write_mysql(commits=commit_str, git_type=os.path.split(options.local)[-1],
+                                            success=cmd_return)
+            if sql_return == None:
+                result_write_mysql(commits=commit_str, git_type=os.path.split(options.local)[-1], success=cmd_return)
+    logger.info('-----------------------conf-pull run end')
