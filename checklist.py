@@ -92,33 +92,72 @@ def check_rpmversion(rpmversion,rpm):
         out = d.stdout.read()
         regex = re.compile(ver)
         if len(regex.findall(out)):
-            print("rpmversion is right: version is "+ver)
+            print("rpmversion is right: \nsoftversion is "+ver)
             return 'true'
         else:
-            print("rpmversion is false: version is not "+ver)
+            print("rpmversion is false: \nsoftversion is not "+ver)
             return 'false'
     except:
         print("err")
         return "error"
 
+def check_servicestatus(servername):
+    s = servername
+    try:
+        d = subprocess.Popen(["service "+s+" status"],stdout=subprocess.PIPE,stderr=subprocess.PIPE,shell=True)
+        out = d.stdout.read()
+        runregex = re.compile('is running')
+        stopregex = re.compile('stop')
+        unregex = re.compile('unrecognized')
+        if len(runregex.findall(out)):
+            print('service '+servername+' is runing')
+            return
+        elif len(stopregex.findall(out)):
+                print('service '+servername+' is stop')
+                return
+        else:
+            print("can not find servce status")
+            return
+    except:
+        print("get service status error")
+        return
+
+
+
+
 
 if __name__=='__main__':
     print('\n\n----------------------CHECKLIST---------------------------')
     print('\n--------------------neterok checklist-----------------------')
+    def printdvline(num):
+        try:
+            t = isinstance(num, int)
+            if t == False:
+                print('\n')
+                return
+            else:
+                if (num == 1):
+                    print("---------------------------------------------------------" + '\n')
+                else:
+                    print('\n')
+        except:
+            print('\n')
+
+
     #network check
     try:
         print("now check bond status:")
         check_bound()
         time.sleep(0.3)
-        print("-----------------------------------------------------"+'\n')
+        printdvline(1)
         print("now check nameserver status")
         check_nameserver()
         time.sleep(0.3)
-        print("----------------------------------------------------" + '\n')
+        printdvline(1)
         print("now check the neighbor status")
         check_lo_neighbor()
-        print("----------------------------------------------------" + '\n')
+        printdvline(1)
         check_rpmversion('haproxy-1.5.12-21.x86_64','haproxy')
     except:
-        print("there is some abnormity interruption")
+        print("checklist is some abnormity interruption")
     #service check
