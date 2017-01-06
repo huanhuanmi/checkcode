@@ -7,9 +7,47 @@ import re
 import subprocess
 import  sys
 import time
+
+#----------------------------------------------General functions-------------------------------------------
 def test(v):
     test.result = v
     return  v
+
+def printdvline(num):
+    try:
+        t = isinstance(num, int)
+        if t == False:
+            print('\n')
+            return
+        else:
+            if (num == 1):
+                print("---------------------------------------------------------" + '\n')
+            else:
+                print('\n')
+    except:
+        print('\n')
+
+def check_servicestatus(servername):
+    s = servername
+    try:
+        d = subprocess.Popen(["service "+s+" status"],stdout=subprocess.PIPE,stderr=subprocess.PIPE,shell=True)
+        out = d.stdout.read()
+        runregex = re.compile('is running')
+        stopregex = re.compile('stop')
+        unregex = re.compile('unrecognized')
+        if len(runregex.findall(out)):
+            print('service '+servername+' is runing')
+            return 'ok'
+        elif len(stopregex.findall(out)):
+                print('service '+servername+' is stop')
+                return 'false'
+        else:
+            print("can not find servce status")
+            return 'non'
+    except:
+        print("get service status error")
+        return 'err'
+
 def check_ping(ip):
     try:
         b = subprocess.Popen(["ping -c 1 -w 1 "+ ip],stdout=subprocess.PIPE,stderr=subprocess.PIPE,shell=True)
@@ -68,9 +106,9 @@ def check_lo_neighbor():
                 print("can not find neighbor")
     return
 #checknameserver ip
-def check_nameserver():
-    serverip1 = '172.16.16.16'
-    serverip2 = '10.16.16.16'
+def check_nameserver(serverip1 = '172.16.16.16',serverip2 = '10.16.16.16'):
+    serverip1 = serverip1
+    serverip2 = serverip2
     nameservercfg = 'False'
     name_servers = list()
     for line in open('/etc/resolv.conf'):
@@ -82,6 +120,65 @@ def check_nameserver():
     print("nameserver config is:"+nameservercfg)
     print(name_servers)
     return name_servers
+
+
+#----------------------------------loopbackcheck-----------------------------------------
+def check_loopback():
+    path = '/etc/sysconfig/network-scripts/ifcfg-lo-range'
+    bgppath = '/etc/quagga/bgpd.conf'
+    ospfpath ='/etc/quagga/ospfd.conf'
+    if check_servicestatus('bgpd') == 'ok':
+        filepath2 = bgppath
+    elif check_servicestatus('ospfd') == 'ok':
+        filepath2 = ospfpath
+    else:
+        return "not bgp or ospf status"
+    os.path.exists(filepath2)
+    for i in range(0,6):
+        filepath1 = path+str(i)
+        if os.path.exists(filepath1):
+            with open(filepath1,'r') as f1:
+                for line in f1:
+                    if line[:13] == 'IPADDR_START=':
+                        startip=line[13:]
+                        ipstartnum=int(startip.split('.')[-1])
+                        print("\nIPADDR_START:"+line[13:])
+                    elif line[:11] == 'IPADDR_END=':
+                        endip=line[11:]
+                        ipendnum=int(endip.split('.')[-1])
+                        print("IPEND:"+line[11:])
+                    else:
+                        continue
+        else:
+            break
+    with open(filepath2,'r') as f2:
+        for line in f2:
+            args = line.strip().split()
+            if args == []:
+                break
+            if args[0] == 'network':
+                if '/' in args[1]:
+                    netip = args[1].split('/')
+                    quaggastartnum = int(netip[0].split('.')[-1])
+                    n = 32-int(netip[1])
+                    quaggaendnum = (quaggastartnum+2**n) -1
+                    if quaggaendnum >= 255:
+                        quaggaendnum = 255
+                else:
+                    bgpips = list()
+                    bgpips.append(args[1])
+
+    if ipstartnum == quaggastartnum and ipendnum == quaggaendnum:
+        print("loopback config files is true!")
+        f2.close()
+        return 'ok'
+    else:
+        print("loopback config files is not true!")
+        f2.close()
+        return 'false'
+
+
+
 
 #-----------------------------------servicecheck------------------------------------------
 def check_rpmversion(rpmversion,rpm):
@@ -101,48 +198,10 @@ def check_rpmversion(rpmversion,rpm):
         print("err")
         return "error"
 
-def check_servicestatus(servername):
-    s = servername
-    try:
-        d = subprocess.Popen(["service "+s+" status"],stdout=subprocess.PIPE,stderr=subprocess.PIPE,shell=True)
-        out = d.stdout.read()
-        runregex = re.compile('is running')
-        stopregex = re.compile('stop')
-        unregex = re.compile('unrecognized')
-        if len(runregex.findall(out)):
-            print('service '+servername+' is runing')
-            return
-        elif len(stopregex.findall(out)):
-                print('service '+servername+' is stop')
-                return
-        else:
-            print("can not find servce status")
-            return
-    except:
-        print("get service status error")
-        return
-
-
-
-
 
 if __name__=='__main__':
-    print('\n\n----------------------CHECKLIST---------------------------')
-    print('\n--------------------neterok checklist-----------------------')
-    def printdvline(num):
-        try:
-            t = isinstance(num, int)
-            if t == False:
-                print('\n')
-                return
-            else:
-                if (num == 1):
-                    print("---------------------------------------------------------" + '\n')
-                else:
-                    print('\n')
-        except:
-            print('\n')
-
+    print('\n\n---------------------CHECKLIST---------------------------')
+    print('\n-----------------neterok checklist-----------------------')
 
     #network check
     try:
@@ -158,6 +217,15 @@ if __name__=='__main__':
         check_lo_neighbor()
         printdvline(1)
         check_rpmversion('haproxy-1.5.12-21.x86_64','haproxy')
+        printdvline(1)
+        print("now check the service status")
+        check_servicestatus('bgpd')
+        printdvline(1)
+        print("now check loopback status:")
+        check_loopback()
+        time.sleep(0.3)
+        printdvline(1)
+
     except:
         print("checklist is some abnormity interruption")
     #service check
